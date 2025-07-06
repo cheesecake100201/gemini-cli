@@ -19,6 +19,7 @@ import {
   ToolCallEvent,
   ToolConfirmationPayload,
 } from '../index.js';
+import { isDeepStrictEqual } from 'node:util';
 import { Part, PartListUnion } from '@google/genai';
 import { getResponseTextFromParts } from '../utils/generateContentResponseUtilities.js';
 import {
@@ -226,6 +227,7 @@ interface CoreToolSchedulerOptions {
 export class CoreToolScheduler {
   private toolRegistry: Promise<ToolRegistry>;
   private toolCalls: ToolCall[] = [];
+  private successfulCallKeys: Set<string> = new Set();
   private outputUpdateHandler?: OutputUpdateHandler;
   private onAllToolCallsComplete?: AllToolCallsCompleteHandler;
   private onToolCallsUpdate?: ToolCallsUpdateHandler;
@@ -293,14 +295,21 @@ export class CoreToolScheduler {
           const durationMs = existingStartTime
             ? Date.now() - existingStartTime
             : undefined;
-          return {
+          const successCall: SuccessfulToolCall = {
             request: currentCall.request,
             tool: toolInstance,
             status: 'success',
             response: auxiliaryData as ToolCallResponseInfo,
             durationMs,
             outcome,
-          } as SuccessfulToolCall;
+          };
+          this.successfulCallKeys.add(
+            this.createCallKey(
+              successCall.request.name,
+              successCall.request.args,
+            ),
+          );
+          return successCall;
         }
         case 'error': {
           const durationMs = existingStartTime
@@ -400,6 +409,10 @@ export class CoreToolScheduler {
     );
   }
 
+  private createCallKey(name: string, args: Record<string, unknown>): string {
+    return `${name}:${JSON.stringify(args)}`;
+  }
+
   async schedule(
     request: ToolCallRequestInfo | ToolCallRequestInfo[],
     signal: AbortSignal,
@@ -410,9 +423,32 @@ export class CoreToolScheduler {
       );
     }
     const requestsToProcess = Array.isArray(request) ? request : [request];
+
+    const filteredRequests: ToolCallRequestInfo[] = [];
+    for (const reqInfo of requestsToProcess) {
+      const key = this.createCallKey(reqInfo.name, reqInfo.args);
+      const duplicateInCalls = this.toolCalls.some(
+        (c) =>
+          c.status === 'success' &&
+          c.request.name === reqInfo.name &&
+          isDeepStrictEqual(c.request.args, reqInfo.args),
+      );
+      if (duplicateInCalls || this.successfulCallKeys.has(key)) {
+        console.warn(
+          `Skipping already successful call to ${reqInfo.name} with identical arguments.`,
+        );
+        continue;
+      }
+      filteredRequests.push(reqInfo);
+    }
+
+    if (filteredRequests.length === 0) {
+      return;
+    }
+
     const toolRegistry = await this.toolRegistry;
 
-    const newToolCalls: ToolCall[] = requestsToProcess.map(
+    const newToolCalls: ToolCall[] = filteredRequests.map(
       (reqInfo): ToolCall => {
         const toolInstance = toolRegistry.getTool(reqInfo.name);
         if (!toolInstance) {
