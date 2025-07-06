@@ -24,6 +24,8 @@ import { Part, PartListUnion } from '@google/genai';
 
 import { ModifiableTool, ModifyContext } from '../tools/modifiable-tool.js';
 
+const originalConsoleWarn = console.warn;
+
 class MockTool extends BaseTool<Record<string, unknown>, ToolResult> {
   shouldConfirm = false;
   executeFn = vi.fn();
@@ -163,6 +165,59 @@ describe('CoreToolScheduler', () => {
     const completedCalls = onAllToolCallsComplete.mock
       .calls[0][0] as ToolCall[];
     expect(completedCalls[0].status).toBe('cancelled');
+  });
+
+  it('should skip scheduling duplicate successful requests', async () => {
+    console.warn = vi.fn();
+
+    const mockTool = new MockTool();
+    const toolRegistry = {
+      getTool: () => mockTool,
+      getFunctionDeclarations: () => [],
+      tools: new Map(),
+      discovery: {} as any,
+      registerTool: () => {},
+      getToolByName: () => mockTool,
+      getToolByDisplayName: () => mockTool,
+      getTools: () => [],
+      discoverTools: async () => {},
+      getAllTools: () => [],
+      getToolsByServer: () => [],
+    };
+
+    const onAllToolCallsComplete = vi.fn();
+    const mockConfig = {
+      getSessionId: () => 'test-session-id',
+      getUsageStatisticsEnabled: () => true,
+      getDebugMode: () => false,
+    } as unknown as Config;
+
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      toolRegistry: Promise.resolve(toolRegistry as any),
+      onAllToolCallsComplete,
+      getPreferredEditor: () => 'vscode',
+    });
+
+    const abortController = new AbortController();
+    const request = {
+      callId: '1',
+      name: 'mockTool',
+      args: { foo: 'bar' },
+      isClientInitiated: false,
+    };
+
+    await scheduler.schedule(request, abortController.signal);
+
+    expect(onAllToolCallsComplete).toHaveBeenCalledTimes(1);
+
+    const duplicateRequest = { ...request, callId: '2' };
+    await scheduler.schedule(duplicateRequest, abortController.signal);
+
+    expect(console.warn).toHaveBeenCalled();
+    expect(onAllToolCallsComplete).toHaveBeenCalledTimes(1);
+
+    console.warn = originalConsoleWarn;
   });
 });
 
